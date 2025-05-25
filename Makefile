@@ -1,3 +1,4 @@
+include make/license.mk
 .PHONY: all test templates yamls build build-%
 .FORCE:
 
