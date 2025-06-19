@@ -28,6 +28,7 @@ master:
     # extraLabelNs: ["added.ns.io","added.kubernets.io"]
     # denyLabelNs: ["denied.ns.io","denied.kubernetes.io"]
     # enableTaints: false
+    # informerPageSize: 200
     # labelWhiteList: "foo"
     # resyncPeriod: "2h"
     # restrictions:
@@ -469,6 +470,12 @@ worker:
 
   priorityClassName: ""
 
+  updateStrategy: {}
+    # type: RollingUpdate
+    # rollingUpdate:
+    #   maxSurge: 0
+    #   maxUnavailable: "10%"
+
 topologyUpdater:
   config: ### <NFD-TOPOLOGY-UPDATER-CONF-START-DO-NOT-REMOVE>
     ## key = node name, value = list of resources to be excluded.
@@ -565,7 +572,7 @@ gc:
       cpu: 10m
       memory: 128Mi
 
-  metricsPort: 8081
+  port: 8080
 
   nodeSelector: {}
   tolerations: []
