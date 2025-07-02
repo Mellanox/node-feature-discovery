@@ -17,7 +17,6 @@ jobs:
       components: '[{"name": "nodeFeatureDiscovery", "imageName": "node-feature-discovery", "Dockerfile": "Dockerfile.nvidia"}]'
       chart-name: node-feature-discovery
       chart-path: "deployment/helm/node-feature-discovery"
-      exclude-chart-files: '["values.yaml"]'
     secrets:
       registry-username: ${{ secrets.NVCR_USERNAME }}
       registry-token: ${{ secrets.NVCR_TOKEN }}
