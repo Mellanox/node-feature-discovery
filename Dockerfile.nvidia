@@ -14,8 +14,9 @@ RUN --mount=type=cache,target=/go/pkg/mod/ \
 # Do actual build
 COPY . /go/node-feature-discovery
 
+
 RUN --mount=type=cache,target=/go/pkg/mod/ \
-    make install VERSION=v0.0.0
+    make install VERSION=v0.0.0 HOSTMOUNT_PREFIX=/host-
 
 # Create minimal variant of the production image
 FROM nvcr.io/nvidia/distroless/go:v3.1.8 AS final
