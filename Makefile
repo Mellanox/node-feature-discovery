@@ -22,6 +22,7 @@ JEKYLL_ENV ?= development
 SITE_BUILD_CMD := $(CONTAINER_RUN_CMD) --rm -i -u "`id -u`:`id -g`" \
 	$(shell [ -t 0 ] && echo '-t') \
 	-e JEKYLL_ENV=$(JEKYLL_ENV) \
+	-e JEKYLL_GITHUB_TOKEN="$$JEKYLL_GITHUB_TOKEN" \
 	$(shell [ "$(JEKYLL_ENV)" = "development" ] && echo '-e PAGES_DISABLE_NETWORK=1') \
 	--volume="$$PWD/docs:/work" \
 	--volume="$$PWD/docs/vendor/bundle:/usr/local/bundle" \
@@ -255,11 +256,11 @@ poll-images:
 
 site-build:
 	@mkdir -p docs/vendor/bundle
-	$(SITE_BUILD_CMD) sh -c "bundle plugin install bundler-override && bundle install && jekyll build $(JEKYLL_OPTS)"
+	$(SITE_BUILD_CMD) sh -c "bundle install && jekyll build $(JEKYLL_OPTS)"
 
 site-serve:
 	@mkdir -p docs/vendor/bundle
-	$(SITE_BUILD_CMD) sh -c "bundle plugin install bundler-override && bundle install && jekyll serve $(JEKYLL_OPTS) -H 127.0.0.1"
+	$(SITE_BUILD_CMD) sh -c "bundle install && jekyll serve $(JEKYLL_OPTS) -H 127.0.0.1"
 
 benchmark:
 	go test -bench=./pkg/nfd-master -run=^# ./pkg/nfd-master
