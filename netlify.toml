@@ -7,7 +7,7 @@
     PAGES_DISABLE_NETWORK = "1"
 
 [[redirects]]
-    from = "/*"
-    to = "https://release-0-17--kubernetes-sigs-nfd.netlify.app/:splat"
+    from = "https://nfd.sigs.k8s.io/*"
+    to = "https://release-0-18--kubernetes-sigs-nfd.netlify.app/:splat"
     status = 301
     force = true

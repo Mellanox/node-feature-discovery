@@ -9,7 +9,7 @@ IMAGE_BUILD_CMD ?= docker build
 IMAGE_BUILD_EXTRA_OPTS ?=
 IMAGE_PUSH_CMD ?= docker push
 CONTAINER_RUN_CMD ?= docker run
-BUILDER_IMAGE ?= golang:1.24-bookworm
+BUILDER_IMAGE ?= golang:1.25-trixie
 BASE_IMAGE_FULL ?= debian:bookworm-slim
 BASE_IMAGE_MINIMAL ?= scratch
 
@@ -18,6 +18,7 @@ BASE_IMAGE_MINIMAL ?= scratch
 # same site url than the "host" it binds to. Thus, all the links will be
 # broken if we'd bind to 0.0.0.0
 RUBY_IMAGE_VERSION := 3.3
+TOOOLCHAIN_MODE ?= $(shell $(GO_CMD) env GOVERSION)+auto
 JEKYLL_ENV ?= development
 SITE_BUILD_CMD := $(CONTAINER_RUN_CMD) --rm -i -u "`id -u`:`id -g`" \
 	$(shell [ -t 0 ] && echo '-t') \
@@ -35,6 +36,7 @@ JEKYLL_OPTS := -d '$(SITE_DESTDIR)' $(if $(SITE_BASEURL),-b '$(SITE_BASEURL)',)
 VERSION := $(shell git describe --tags --dirty --always --match "v*")
 
 CHART_VERSION ?= $(shell echo $(VERSION) | cut -c2-)
+CHART_EXTRA_VERSIONS ?=
 
 IMAGE_REGISTRY ?= registry.k8s.io/nfd
 IMAGE_TAG_NAME ?= $(VERSION)
@@ -152,20 +154,8 @@ templates:
 	@rm nfd-worker.conf.tmp
 	@rm nfd-topology-updater.conf.tmp
 
-.generator.image.stamp: Dockerfile_generator
-	$(IMAGE_BUILD_CMD) \
-	    --build-arg BUILDER_IMAGE=$(BUILDER_IMAGE) \
-	    -t nfd-generator \
-	    -f Dockerfile_generator .
-
-generate: .generator.image.stamp
-	$(CONTAINER_RUN_CMD) --rm \
-	    -v "`pwd`:/go/node-feature-discovery" \
-	    -v "`go env GOCACHE`:/.cache" \
-	    -v "`go env GOMODCACHE`:/go/pkg/mod" \
-	    --user=`id -u`:`id -g`\
-	    nfd-generator \
-	    ./hack/update_codegen.sh
+generate:
+	hack/update_codegen.sh
 
 gofmt:
 	@$(GO_FMT) -w -l $$(find . -name '*.go')
@@ -191,16 +181,44 @@ mdlint:
 	ruby:slim \
 	/workdir/scripts/test-infra/mdlint.sh
 
+.PHONY: helm-generate
+helm-generate: helm-lint helm-docs helm-schema
+
+.PHONY: helm-schema
+helm-schema:
+	cd deployment/helm/node-feature-discovery/ && \
+	go tool helm-values-schema-json
+
+.PHONY: helm-docs
+helm-docs:
+	cd deployment/helm/node-feature-discovery/ && \
+	go tool helm-docs \
+	    -t README.md.gotmpl -t _metadata.gotmpl -t _templates.gotmpl \
+	    --sort-values-order file && \
+	go tool helm-docs \
+	    -t ../../../docs/deployment/helm.md.gotmpl -t _metadata-site.gotmpl -t _templates.gotmpl \
+	    --sort-values-order file \
+	    -o ../../../docs/deployment/helm.md
+
 helm-lint:
 	helm lint --strict deployment/helm/node-feature-discovery/
 
 helm-push:
-	helm package deployment/helm/node-feature-discovery --version $(CHART_VERSION) --app-version $(IMAGE_TAG_NAME)
-	helm push node-feature-discovery-$(CHART_VERSION).tgz oci://${IMAGE_REGISTRY}/charts
+	for v in $(CHART_VERSION) $(CHART_EXTRA_VERSIONS); do \
+	    helm package deployment/helm/node-feature-discovery --version $$v --app-version $(IMAGE_TAG_NAME); \
+	    helm push node-feature-discovery-$$v.tgz oci://${IMAGE_REGISTRY}/charts; \
+	done
+	# Push artifacthub.io metadata
+	# Ref: https://artifacthub.io/docs/topics/repositories/helm-charts/#oci-support
+	oras push \
+	    ${IMAGE_REGISTRY}/charts/node-feature-discovery:artifacthub.io \
+	    --config /dev/null:application/vnd.cncf.artifacthub.config.v1+yaml \
+	    artifacthub-repo.yml:application/vnd.cncf.artifacthub.repository-metadata.layer.v1.yaml
 
+# TODO: Remove TOOOLCHAIN_MODE variable when fixed in upstream Go toolchain. Ref: https://github.com/golang/go/issues/75031
 test:
-	$(GO_CMD) test -covermode=atomic -coverprofile=coverage.out ./cmd/... ./pkg/... ./source/...
-	cd api/nfd && $(GO_CMD) test -covermode=atomic -coverprofile=coverage.out ./...
+	GOTOOLCHAIN=${TOOOLCHAIN_MODE} $(GO_CMD) test -covermode=atomic -coverprofile=coverage.out ./cmd/... ./pkg/... ./source/...
+	cd api/nfd && GOTOOLCHAIN=${TOOOLCHAIN_MODE} $(GO_CMD) test -covermode=atomic -coverprofile=coverage.out ./...
 
 e2e-test:
 	@if [ -z ${KUBECONFIG} ]; then echo "[ERR] KUBECONFIG missing, must be defined"; exit 1; fi

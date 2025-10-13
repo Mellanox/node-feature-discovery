@@ -129,7 +129,9 @@ if [ -z "$no_patching" ]; then
     echo Patching docs/_config.yml
     sed -e s"/release:.*/release: $release/"  \
         -e s"/version:.*/version: $docs_version/" \
+        -e s"/helm_chart_version:.*/helm_chart_version: $semver/" \
         -e s"!container_image:.*!container_image: registry.k8s.io/nfd/node-feature-discovery:$release!" \
+        -e s"!helm_oci_repo:.*!helm_oci_repo: oci://registry.k8s.io/nfd/charts/node-feature-discovery!" \
         -i docs/_config.yml
 
     # Patch README
@@ -147,12 +149,21 @@ if [ -z "$no_patching" ]; then
 
     # Patch Helm chart
     echo "Patching Helm chart"
-    sed -e s"/appVersion:.*/appVersion: $release/" -i deployment/helm/node-feature-discovery/Chart.yaml
+    sed -e s"/appVersion:.*/appVersion: $release/" \
+        -e s"!icon:.*!icon: https://kubernetes-sigs.github.io/node-feature-discovery/$docs_version/assets/images/nfd/favicon.svg!" \
+        -i deployment/helm/node-feature-discovery/Chart.yaml
     sed -e s"/pullPolicy:.*/pullPolicy: IfNotPresent/" \
         -e s"!gcr.io/k8s-staging-nfd/node-feature-discovery!registry.k8s.io/nfd/node-feature-discovery!" \
+        -e s"!kubernetes-sigs.github.io/node-feature-discovery/master!kubernetes-sigs.github.io/node-feature-discovery/$docs_version!" \
         -i deployment/helm/node-feature-discovery/values.yaml
     sed -e s"!kubernetes-sigs.github.io/node-feature-discovery/master!kubernetes-sigs.github.io/node-feature-discovery/$docs_version!" \
         -i deployment/helm/node-feature-discovery/README.md
+    sed -e s"!.*metadata\.oci_repo.*!{{- define \"metadata.oci_repo\" -}}oci://registry.k8s.io/nfd/charts/node-feature-discovery!" \
+        -e s"/.*metadata\.oci_tag.*/{{- define \"metadata.oci_tag\" -}}$semver/" \
+        -e s"/.*metadata\.docs_version.*/{{- define \"metadata.docs_version\" -}}$docs_version/" \
+        -e s"/.*metadata\.nfd_release.*/{{- define \"metadata.nfd_release\" -}}$release/" \
+        -i deployment/helm/node-feature-discovery/_metadata.gotmpl
+    make helm-docs
 
     # Patch e2e test
     echo Patching test/e2e/node_feature_discovery.go flag defaults to registry.k8s.io/nfd/node-feature-discovery and $release
