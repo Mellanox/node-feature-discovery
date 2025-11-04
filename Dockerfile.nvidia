@@ -1,3 +1,5 @@
+ARG BASE_IMAGE_GO_DISTROLESS
+
 # Build node feature discovery
 FROM golang:1.25 AS builder
 
@@ -21,7 +23,7 @@ RUN --mount=type=cache,target=/go/pkg/mod/ \
     make install VERSION=v0.0.0 HOSTMOUNT_PREFIX=/host-
 
 # Create minimal variant of the production image
-FROM nvcr.io/nvidia/distroless/go:v3.2.0 AS final
+FROM ${BASE_IMAGE_GO_DISTROLESS:-nvcr.io/nvidia/distroless/go:v3.2.1} AS final
 
 # Run as unprivileged user
 USER 65534:65534
