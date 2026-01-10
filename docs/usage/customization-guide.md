@@ -928,7 +928,7 @@ The following features are available for matching:
 |                  |              | **`family`** | int    | CPU family |
 |                  |              | **`vendor_id`** | string | CPU vendor ID |
 |                  |              | **`id`** | int        | CPU model ID |
-|                  |              | **`hypervisor`** | string | Hypervisor type information from `/proc/sysinfo` (s390x-only feature) |
+|                  |              | **`hypervisor`** | string | Hypervisor type information. On s390x read from `/proc/sysinfo`. On x86_64/arm64 detected via CPUID. Value 'none' on physical hardware. |
 | **`cpu.pstate`** | attribute    |          |            | State of the Intel pstate driver. Does not exist if the driver is not enabled. |
 |                  |              | **`status`** | string | Status of the driver, possible values are 'active' and 'passive' |
 |                  |              | **`turbo`**  | bool   | 'true' if turbo frequencies are enabled, otherwise 'false' |
@@ -962,6 +962,8 @@ The following features are available for matching:
 |                  |              | **`mod-name`** |      | Kernel module `<mod-name>` is loaded |
 | **`kernel.selinux`** | attribute |         |            | Kernel SELinux related features |
 |                  |              | **`enabled`** | bool  | `true` if SELinux has been enabled and is in enforcing mode, otherwise `false` |
+| **`kernel.kvm`** | attribute |         |            | Kernel KVM related features |
+|                  |              | **`enabled`** | bool  | `true` if KVM has been enabled, otherwise `false` |
 | **`kernel.version`** | attribute |          |           | Kernel version information |
 |                  |              | **`full`** | string   | Full kernel version (e.g. ‘4.5.6-7-g123abcde') |
 |                  |              | **`major`** | int     | First component of the kernel version (e.g. ‘4') |
