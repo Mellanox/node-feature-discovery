@@ -16,11 +16,10 @@ jobs:
       service-account-email: svc-cloud-orch-gh@nvidia.com
       # For the component name, use the name of the component from https://github.com/Mellanox/network-operator/blob/master/hack/release.yaml
       # Otherwise, it won't be able to update the versions correctly
-      components: '[{"name": "nodeFeatureDiscovery", "imageName": "node-feature-discovery", "Dockerfile": "Dockerfile.nvidia"}]'
+      components: '[{"name": "nodeFeatureDiscovery", "imageName": "node-feature-discovery", "dockerfile": "Dockerfile.nvidia"}]'
       chart-name: node-feature-discovery
       chart-path: "deployment/helm/node-feature-discovery"
     secrets:
       registry-username: ${{ secrets.NVCR_USERNAME }}
       registry-token: ${{ secrets.NVCR_TOKEN }}
       cicd-gh-token: ${{ secrets.GH_TOKEN_NVIDIA_CI_CD }}
-      goproxy: ${{ secrets.GO_PROXY_URL }}
