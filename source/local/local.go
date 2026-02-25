@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"k8s.io/klog/v2"
@@ -69,9 +70,11 @@ var (
 
 // localSource implements the FeatureSource, LabelSource, EventSource interfaces.
 type localSource struct {
-	features  *nfdv1alpha1.Features
-	config    *Config
-	fsWatcher *fsnotify.Watcher
+	features   *nfdv1alpha1.Features
+	config     *Config
+	cancelFunc context.CancelFunc // cancels the active notifier goroutine
+	wg         sync.WaitGroup     // tracks the active notifier goroutine
+	mu         sync.Mutex         // serializes SetNotifyChannel and protects fields
 }
 
 type Config struct {
@@ -322,30 +325,67 @@ func getFileContent(fileName string) ([][]byte, error) {
 	return lines, nil
 }
 
-func (s *localSource) runNotifier(ctx context.Context, ch chan *source.FeatureSource) {
-	rateLimit := time.NewTicker(time.Second)
-	defer rateLimit.Stop()
-	limit := false
-	for {
-		select {
-		case event := <-s.fsWatcher.Events:
-			opAny := fsnotify.Create | fsnotify.Write | fsnotify.Remove | fsnotify.Rename | fsnotify.Chmod
-			if event.Op&opAny != 0 {
-				klog.V(2).InfoS("fsnotify event", "eventName", event.Name, "eventOp", event.Op)
-				if !limit {
-					fs := source.FeatureSource(s)
-					ch <- &fs
-					limit = true
-				}
+// runNotifier returns a function that watches for fsnotify events and sends
+// notifications on ch. The returned function closes the watcher when done.
+func (s *localSource) runNotifier(ctx context.Context, ch chan *source.FeatureSource, watcher *fsnotify.Watcher) func() {
+	return func() {
+		rateLimit := time.NewTicker(time.Second)
+		defer rateLimit.Stop()
+		defer func() {
+			// Each goroutine is responsible for closing its own watcher
+			if err := watcher.Close(); err != nil {
+				klog.ErrorS(err, "failed to close fsnotify watcher")
 			}
-		case err := <-s.fsWatcher.Errors:
-			klog.ErrorS(err, "failed to watch features.d changes")
-		case <-rateLimit.C:
-			limit = false
-		case <-ctx.Done():
-			return
+		}()
+		limit := false
+		for {
+			select {
+			case event := <-watcher.Events:
+				opAny := fsnotify.Create | fsnotify.Write | fsnotify.Remove | fsnotify.Rename | fsnotify.Chmod
+				if event.Op&opAny != 0 {
+					klog.V(2).InfoS("fsnotify event", "eventName", event.Name, "eventOp", event.Op)
+					if !limit {
+						fs := source.FeatureSource(s)
+						ch <- &fs
+						limit = true
+					}
+				}
+			case err := <-watcher.Errors:
+				klog.ErrorS(err, "failed to watch features.d changes")
+			case <-rateLimit.C:
+				limit = false
+			case <-ctx.Done():
+				return
+			}
 		}
 	}
+}
+
+// stopNotifier cancels the active notifier goroutine.
+// The goroutine is responsible for closing its own watcher.
+// Must be called with s.mu held.
+func (s *localSource) stopNotifier() {
+	if s.cancelFunc != nil {
+		s.cancelFunc()
+		s.cancelFunc = nil
+	}
+}
+
+// createWatcher creates a new fsnotify watcher for the feature files directory.
+func createWatcher() (*fsnotify.Watcher, error) {
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return nil, err
+	}
+
+	if err := watcher.Add(featureFilesDir); err != nil {
+		if errClose := watcher.Close(); errClose != nil {
+			klog.ErrorS(errClose, "failed to close fsnotify watcher")
+		}
+		return nil, fmt.Errorf("unable to access %v: %w", featureFilesDir, err)
+	}
+
+	return watcher, nil
 }
 
 // SetNotifyChannel method of the EventSource Interface
@@ -356,22 +396,26 @@ func (s *localSource) SetNotifyChannel(ctx context.Context, ch chan *source.Feat
 	}
 
 	if info.IsDir() {
-		if s.fsWatcher == nil {
-			watcher, err := fsnotify.NewWatcher()
-			if err != nil {
-				return err
-			}
-			err = watcher.Add(featureFilesDir)
-			if err != nil {
-				errWatcher := watcher.Close()
-				if errWatcher != nil {
-					klog.ErrorS(errWatcher, "failed to close fsnotify watcher")
-				}
-				return fmt.Errorf("unable to access %v: %w", featureFilesDir, err)
-			}
-			s.fsWatcher = watcher
+		s.mu.Lock()
+		defer s.mu.Unlock()
+
+		// Create watcher under lock to prevent concurrent calls from
+		// creating multiple watchers where some leak due to race conditions.
+		watcher, err := createWatcher()
+		if err != nil {
+			return err
 		}
-		go s.runNotifier(ctx, ch)
+
+		// Stop any existing notifier and wait for it to fully exit.
+		// Safe to wait under lock since runNotifier doesn't acquire mu.
+		s.stopNotifier()
+		s.wg.Wait()
+
+		// Create a cancellable context for the notifier goroutine
+		notifyCtx, cancel := context.WithCancel(ctx)
+		s.cancelFunc = cancel
+
+		s.wg.Go(s.runNotifier(notifyCtx, ch, watcher))
 	}
 
 	return nil
