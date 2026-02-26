@@ -282,6 +282,20 @@ func getCPUModel() map[string]string {
 		cpuModelInfo["hypervisor"] = hypervisor
 	}
 
+	if runtime.GOARCH == "s390x" {
+		s390xAttrs := getS390xAttributes()
+		if v := s390xAttrs["vendor_id"]; v != "" {
+			cpuModelInfo["vendor_id"] = v
+		}
+		if f := s390xAttrs["family"]; f != "" && f != "0" {
+			cpuModelInfo["family"] = f
+		}
+		if id := s390xAttrs["id"]; id != "" && id != "0" {
+			cpuModelInfo["id"] = id
+		}
+
+	}
+
 	return cpuModelInfo
 }
 
@@ -325,6 +339,38 @@ func getHypervisorFromProcSysinfo() (string, error) {
 	hypervisor = fullRegex.ReplaceAllString(hypervisor, "_")
 
 	return hypervisor, nil
+}
+
+func getS390xAttributes() map[string]string {
+	attrs := make(map[string]string)
+	attrs["vendor_id"] = ""
+	attrs["family"] = "0"
+	attrs["id"] = "0"
+
+	if data, err := os.ReadFile("/proc/cpuinfo"); err == nil {
+		lines := strings.Split(string(data), "\n")
+		for _, line := range lines {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) < 2 {
+				continue
+			}
+			key := strings.TrimSpace(parts[0])
+			val := strings.TrimSpace(parts[1])
+
+			switch key {
+			case "vendor_id":
+				// Sanitize IBM/S390 -> IBM_S390
+				attrs["vendor_id"] = regexp.MustCompile("[^-A-Za-z0-9_.]+").ReplaceAllString(val, "_")
+			case "machine":
+				attrs["id"] = val
+			case "identification":
+				if attrs["family"] == "0" { // Only set once for the first processor found
+					attrs["family"] = val
+				}
+			}
+		}
+	}
+	return attrs
 }
 
 func getHypervisorFromCPUID() (string, error) {
