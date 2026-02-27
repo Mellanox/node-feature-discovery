@@ -324,7 +324,7 @@ func getHypervisorFromProcSysinfo() (string, error) {
 		return "", err
 	}
 
-	hypervisor := "PR/SM"
+	hypervisor := ""
 	for _, line := range strings.Split(string(data), "\n") {
 		if strings.Contains(line, "Control Program:") {
 			parts := strings.SplitN(line, ":", 2)
@@ -333,6 +333,9 @@ func getHypervisorFromProcSysinfo() (string, error) {
 			}
 			break
 		}
+	}
+	if hypervisor == "" {
+		return "none", nil
 	}
 	// Replace forbidden symbols
 	fullRegex := regexp.MustCompile("[^-A-Za-z0-9_.]+")
