@@ -96,8 +96,7 @@ func makeFakeFeatures(names []string) (source.FeatureLabels, Labels) {
 
 func TestConfigParse(t *testing.T) {
 	Convey("When parsing configuration", t, func() {
-		//nolint:staticcheck // See issue #2400 for migration to NewClientset
-		k8sCli := fakeclient.NewSimpleClientset()
+		k8sCli := fakeclient.NewClientset()
 		w, err := NewNfdWorker(WithArgs(&Args{}),
 			WithKubernetesClient(k8sCli))
 		So(err, ShouldBeNil)
@@ -207,8 +206,7 @@ func TestNewNfdWorker(t *testing.T) {
 
 		Convey("without any args specified", func() {
 			args := &Args{}
-			//nolint:staticcheck // See issue #2400 for migration to NewClientset
-			k8sCli := fakeclient.NewSimpleClientset()
+			k8sCli := fakeclient.NewClientset()
 			w, err := NewNfdWorker(WithArgs(args),
 				WithKubernetesClient(k8sCli))
 			Convey("no error should be returned", func() {
@@ -227,8 +225,7 @@ func TestNewNfdWorker(t *testing.T) {
 			args := &Args{Overrides: ConfigOverrideArgs{
 				LabelSources:   &utils.StringSliceVal{"fake"},
 				FeatureSources: &utils.StringSliceVal{"cpu"}}}
-			//nolint:staticcheck // See issue #2400 for migration to NewClientset
-			k8sCli := fakeclient.NewSimpleClientset()
+			k8sCli := fakeclient.NewClientset()
 			w, err := NewNfdWorker(WithArgs(args),
 				WithKubernetesClient(k8sCli))
 			Convey("no error should be returned", func() {

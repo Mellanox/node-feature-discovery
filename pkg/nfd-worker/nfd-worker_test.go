@@ -41,6 +41,7 @@ func initializeFeatureGates() {
 }
 
 func TestRun(t *testing.T) {
+	//nolint:staticcheck
 	nfdCli := fakenfdclient.NewSimpleClientset()
 	initializeFeatureGates()
 	Convey("When running nfd-worker", t, func() {
@@ -54,8 +55,7 @@ func TestRun(t *testing.T) {
 					LabelSources:   &utils.StringSliceVal{"fake"},
 				},
 			}
-			//nolint:staticcheck // See issue #2400 for migration to NewClientset
-			k8sCli := fakeclient.NewSimpleClientset()
+			k8sCli := fakeclient.NewClientset()
 			w, _ := worker.NewNfdWorker(
 				worker.WithArgs(args),
 				worker.WithKubernetesClient(k8sCli),
