@@ -95,6 +95,8 @@ func parseArgs(flags *flag.FlagSet, osArgs ...string) *worker.Args {
 			args.Overrides.NoPublishFeatures = overrides.NoPublishFeatures
 		case "no-owner-refs":
 			args.Overrides.NoOwnerRefs = overrides.NoOwnerRefs
+		case "owner-refs":
+			args.Overrides.OwnerRefs = overrides.OwnerRefs
 		}
 	})
 
@@ -123,11 +125,14 @@ func initFlags(flagset *flag.FlagSet) (*worker.Args, *worker.ConfigOverrideArgs)
 		FeatureSources:    &utils.StringSliceVal{},
 		LabelSources:      &utils.StringSliceVal{},
 		NoPublishFeatures: &utils.StringSliceVal{},
+		OwnerRefs:         &worker.OwnerRefSources{"pod", "ds"},
 	}
 	overrides.NoPublish = flagset.Bool("no-publish", false,
 		"Do not publish discovered features, disable connection to nfd-master and don't create NodeFeature object.")
 	overrides.NoOwnerRefs = flagset.Bool("no-owner-refs", false,
-		"Do not set owner references for NodeFeature object.")
+		"Do not set owner references for NodeFeature object (deprecated: use -owner-refs=).")
+	flagset.Var(overrides.OwnerRefs, "owner-refs",
+		"Comma separated list of NodeFeature owner reference sources: node, pod, ds. An empty value disables owner references.")
 	flagset.Var(overrides.FeatureSources, "feature-sources",
 		"Comma separated list of feature sources. Special value 'all' enables all sources. "+
 			"Prefix the source name with '-' to disable it.")

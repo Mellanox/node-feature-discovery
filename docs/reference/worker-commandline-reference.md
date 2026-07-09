@@ -181,10 +181,46 @@ Example:
 nfd-worker -no-publish
 ```
 
+### -owner-refs
+
+The `-owner-refs` flag selects the objects referenced as owners of the
+NodeFeature object. It accepts a comma-separated list containing `node`, `pod`
+and/or `ds`. An explicitly empty value disables owner references.
+
+The owners have different lifecycle semantics:
+
+- `node` ties the NodeFeature to the UID of the current Node.
+- `pod` ties it to the UID of the nfd-worker Pod.
+- `ds` ties it to the DaemonSet that owns the nfd-worker Pod.
+
+When multiple owners are configured, Kubernetes keeps the NodeFeature while at
+least one owner still exists. For example, `node,ds` does not cause native
+garbage collection on a Node rebuild while the DaemonSet exists.
+
+Selecting `node` requires the worker service account to have `get` permission
+for Nodes. The Helm chart creates this permission when `worker.ownerRefs`
+contains `node`. Kustomize installations must include the
+[`worker-node-rbac`](https://github.com/kubernetes-sigs/node-feature-discovery/tree/{{site.release}}/deployment/components/worker-node-rbac)
+component. The NFD garbage collector may still explicitly delete stale
+NodeFeature objects independently of native owner-reference garbage collection.
+
+> **NOTE:** This flag takes precedence over the
+> [`core.ownerRefs`](worker-configuration-reference.md#coreownerrefs)
+> configuration file option.
+
+Default: `pod,ds`
+
+Example:
+
+```bash
+nfd-worker -owner-refs=node
+```
+
 ### -no-owner-refs
 
-The `-no-owner-refs` flag disables setting the owner references to Pod
-of the NodeFeature object.
+The `-no-owner-refs` flag disables setting owner references on the NodeFeature
+object. It takes precedence over `-owner-refs`. It is deprecated; use
+`-owner-refs=` instead.
 
 > **NOTE:** This flag takes precedence over the
 > [`core.noOwnerRefs`](worker-configuration-reference.md#corenoownerrefs)

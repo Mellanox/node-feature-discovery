@@ -28,6 +28,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	extclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
@@ -303,6 +304,231 @@ var _ = NFDDescribe(Label("nfd-master"), func() {
 				By("Verify that labels from nfd-worker are garbage-collected")
 				delete(expectedLabels, workerPod.Spec.NodeName)
 				eventuallyNonControlPlaneNodes(ctx, f.ClientSet).WithTimeout(1 * time.Minute).Should(MatchLabels(expectedLabels, nodes))
+			})
+		})
+
+		Context("and a worker daemonset publishing NodeFeature owner references", func() {
+			type ownerIdentity struct {
+				APIVersion string
+				Kind       string
+				Name       string
+				UID        types.UID
+			}
+
+			var (
+				targetNodeName         string
+				targetNode             *corev1.Node
+				activeNodeSelector     map[string]string
+				workerDSName           string
+				workerDSUID            types.UID
+				workerPodLabelSelector string
+				firstWorkerPod         *corev1.Pod
+				originalNodeFeature    *nfdv1alpha1.NodeFeature
+			)
+
+			newTargetNode := func() *corev1.Node {
+				return &corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: targetNodeName,
+						// A real kubelet-registered Node always has its labels and
+						// annotations maps populated. nfd-master patches the Node with
+						// JSON Patch "add" operations, which require the parent
+						// /metadata/labels and /metadata/annotations objects to already
+						// exist, so seed them here to mimic a genuine Node.
+						//
+						// Deliberately omit the hostname label: the "restores labels"
+						// spec pauses the daemonset by pointing its nodeSelector at
+						// {hostname: targetNodeName}, which must match no node.
+						Labels: map[string]string{
+							corev1.LabelOSStable: "linux",
+						},
+						Annotations: map[string]string{
+							"node.alpha.kubernetes.io/ttl": "0",
+						},
+					},
+					Spec: corev1.NodeSpec{Unschedulable: true},
+				}
+			}
+			listWorkerPods := func(ctx context.Context) ([]corev1.Pod, error) {
+				podList, err := f.ClientSet.CoreV1().Pods(f.Namespace.Name).List(ctx, metav1.ListOptions{LabelSelector: workerPodLabelSelector})
+				if err != nil {
+					return nil, err
+				}
+				return podList.Items, nil
+			}
+			waitForNewWorkerPod := func(ctx context.Context, previousUID types.UID) *corev1.Pod {
+				var workerPod *corev1.Pod
+				Eventually(func(ctx context.Context) error {
+					pods, err := listWorkerPods(ctx)
+					if err != nil {
+						return err
+					}
+					if len(pods) != 1 {
+						return fmt.Errorf("expected one worker Pod, got %d", len(pods))
+					}
+					if pods[0].UID == previousUID || pods[0].DeletionTimestamp != nil {
+						return fmt.Errorf("waiting for a new worker Pod")
+					}
+					workerPod = pods[0].DeepCopy()
+					return nil
+				}).WithPolling(time.Second).WithTimeout(5 * time.Minute).WithContext(ctx).Should(Succeed())
+				return workerPod
+			}
+			getNodeFeature := func(ctx context.Context) (*nfdv1alpha1.NodeFeature, error) {
+				return nfdClient.NfdV1alpha1().NodeFeatures(f.Namespace.Name).Get(ctx, targetNodeName, metav1.GetOptions{})
+			}
+			getOwnerIdentities := func(ctx context.Context) ([]ownerIdentity, error) {
+				nf, err := getNodeFeature(ctx)
+				if err != nil {
+					return nil, err
+				}
+				owners := make([]ownerIdentity, len(nf.OwnerReferences))
+				for i, owner := range nf.OwnerReferences {
+					owners[i] = ownerIdentity{APIVersion: owner.APIVersion, Kind: owner.Kind, Name: owner.Name, UID: owner.UID}
+				}
+				return owners, nil
+			}
+			getFakeLabel := func(ctx context.Context) (string, error) {
+				node, err := f.ClientSet.CoreV1().Nodes().Get(ctx, targetNodeName, metav1.GetOptions{})
+				if err != nil {
+					return "", err
+				}
+				return node.Labels[nfdv1alpha1.FeatureLabelNs+"/fake-fakefeature1"], nil
+			}
+			updateWorkerDaemonSet := func(ctx context.Context, mutate func(*appsv1.DaemonSet)) {
+				workerDS, err := f.ClientSet.AppsV1().DaemonSets(f.Namespace.Name).Get(ctx, workerDSName, metav1.GetOptions{})
+				Expect(err).NotTo(HaveOccurred())
+				mutate(workerDS)
+				_, err = f.ClientSet.AppsV1().DaemonSets(f.Namespace.Name).Update(ctx, workerDS, metav1.UpdateOptions{})
+				Expect(err).NotTo(HaveOccurred())
+			}
+			expectDefaultOwners := func(ctx context.Context, workerPod *corev1.Pod) {
+				podOwner := ownerIdentity{APIVersion: "v1", Kind: "Pod", Name: workerPod.Name, UID: workerPod.UID}
+				dsOwner := ownerIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Name: workerDSName, UID: workerDSUID}
+				Eventually(getOwnerIdentities).WithPolling(time.Second).WithTimeout(5 * time.Minute).WithContext(ctx).Should(ConsistOf(podOwner, dsOwner))
+			}
+
+			JustBeforeEach(func(ctx context.Context) {
+				workerDSName = ""
+				nodes, err := getNonControlPlaneNodes(ctx, f.ClientSet)
+				Expect(err).NotTo(HaveOccurred())
+				hostname, ok := nodes[0].Labels[corev1.LabelHostname]
+				Expect(ok).To(BeTrue(), "worker node %q has no hostname label", nodes[0].Name)
+				activeNodeSelector = map[string]string{corev1.LabelHostname: hostname}
+
+				targetNodeName = fmt.Sprintf("nfd-owner-refs-e2e-%d", time.Now().UnixNano())
+				By("Creating a synthetic target node")
+				targetNode, err = f.ClientSet.CoreV1().Nodes().Create(ctx, newTargetNode(), metav1.CreateOptions{})
+				Expect(err).NotTo(HaveOccurred())
+
+				workerDS := testds.NFDWorker(
+					testpod.SpecWithContainerImage(dockerImage()),
+					testpod.SpecWithContainerExtraArgs("-feature-sources=fake", "-label-sources=fake"),
+				)
+				workerDS.Spec.Template.Spec.NodeSelector = maps.Clone(activeNodeSelector)
+				nodeNameEnvFound := false
+				for i := range workerDS.Spec.Template.Spec.Containers[0].Env {
+					env := &workerDS.Spec.Template.Spec.Containers[0].Env[i]
+					if env.Name == "NODE_NAME" {
+						env.Value = targetNodeName
+						env.ValueFrom = nil
+						nodeNameEnvFound = true
+						break
+					}
+				}
+				Expect(nodeNameEnvFound).To(BeTrue())
+
+				By("Creating an nfd-worker daemonset with the default owner references")
+				workerDS, err = f.ClientSet.AppsV1().DaemonSets(f.Namespace.Name).Create(ctx, workerDS, metav1.CreateOptions{})
+				Expect(err).NotTo(HaveOccurred())
+				workerDSName = workerDS.Name
+				workerDSUID = workerDS.UID
+				workerPodLabelSelector = fmt.Sprintf("name=%s", workerDS.Spec.Template.Labels["name"])
+
+				firstWorkerPod = waitForNewWorkerPod(ctx, "")
+				expectDefaultOwners(ctx, firstWorkerPod)
+				Eventually(getFakeLabel).WithPolling(time.Second).WithTimeout(time.Minute).WithContext(ctx).Should(Equal("true"))
+				originalNodeFeature, err = getNodeFeature(ctx)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(originalNodeFeature.Annotations).To(HaveKeyWithValue(nfdv1alpha1.WorkerPodUIDAnnotation, string(firstWorkerPod.UID)))
+			})
+
+			AfterEach(func(ctx context.Context) {
+				if workerDSName != "" {
+					err := f.ClientSet.AppsV1().DaemonSets(f.Namespace.Name).Delete(ctx, workerDSName, metav1.DeleteOptions{})
+					if !apierrors.IsNotFound(err) {
+						Expect(err).NotTo(HaveOccurred())
+					}
+					Eventually(listWorkerPods).WithPolling(time.Second).WithTimeout(2 * time.Minute).WithContext(ctx).Should(BeEmpty())
+				}
+				if targetNodeName != "" {
+					err := f.ClientSet.CoreV1().Nodes().Delete(ctx, targetNodeName, metav1.DeleteOptions{})
+					if !apierrors.IsNotFound(err) {
+						Expect(err).NotTo(HaveOccurred())
+					}
+				}
+			})
+
+			It("restores labels after a same-name Node is recreated", Label("nfd-worker"), func(ctx context.Context) {
+				By("Pausing the daemonset and waiting for the worker Pod to disappear")
+				updateWorkerDaemonSet(ctx, func(workerDS *appsv1.DaemonSet) {
+					workerDS.Spec.Template.Spec.NodeSelector = map[string]string{corev1.LabelHostname: targetNodeName}
+				})
+				Eventually(listWorkerPods).WithPolling(time.Second).WithTimeout(2 * time.Minute).WithContext(ctx).Should(BeEmpty())
+
+				By("Verifying the NodeFeature survives through its DaemonSet owner")
+				survivingNodeFeature, err := getNodeFeature(ctx)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(survivingNodeFeature.UID).To(Equal(originalNodeFeature.UID))
+				Expect(survivingNodeFeature.Spec).To(Equal(originalNodeFeature.Spec))
+
+				By("Deleting and recreating the target node with the same name")
+				oldNodeUID := targetNode.UID
+				err = f.ClientSet.CoreV1().Nodes().Delete(ctx, targetNodeName, metav1.DeleteOptions{})
+				Expect(err).NotTo(HaveOccurred())
+				Eventually(func(ctx context.Context) (bool, error) {
+					_, err := f.ClientSet.CoreV1().Nodes().Get(ctx, targetNodeName, metav1.GetOptions{})
+					if apierrors.IsNotFound(err) {
+						return true, nil
+					}
+					return false, err
+				}).WithPolling(time.Second).WithTimeout(time.Minute).WithContext(ctx).Should(BeTrue())
+
+				targetNode, err = f.ClientSet.CoreV1().Nodes().Create(ctx, newTargetNode(), metav1.CreateOptions{})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(targetNode.UID).NotTo(Equal(oldNodeUID))
+				Expect(targetNode.Labels).NotTo(HaveKey(nfdv1alpha1.FeatureLabelNs + "/fake-fakefeature1"))
+
+				By("Resuming the daemonset with its existing default configuration")
+				updateWorkerDaemonSet(ctx, func(workerDS *appsv1.DaemonSet) {
+					workerDS.Spec.Template.Spec.NodeSelector = maps.Clone(activeNodeSelector)
+				})
+				secondWorkerPod := waitForNewWorkerPod(ctx, firstWorkerPod.UID)
+				expectDefaultOwners(ctx, secondWorkerPod)
+				Eventually(getFakeLabel).WithPolling(time.Second).WithTimeout(time.Minute).WithContext(ctx).Should(Equal("true"))
+
+				resyncedNodeFeature, err := getNodeFeature(ctx)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resyncedNodeFeature.UID).To(Equal(originalNodeFeature.UID))
+				Expect(resyncedNodeFeature.Spec).To(Equal(originalNodeFeature.Spec))
+				Expect(resyncedNodeFeature.Annotations).To(HaveKeyWithValue(nfdv1alpha1.WorkerPodUIDAnnotation, string(secondWorkerPod.UID)))
+			})
+
+			It("migrates an existing NodeFeature from the default owners to the Node owner", Label("nfd-worker"), func(ctx context.Context) {
+				By("Rolling the worker configuration from the default owners to the Node owner")
+				updateWorkerDaemonSet(ctx, func(workerDS *appsv1.DaemonSet) {
+					workerDS.Spec.Template.Spec.Containers[0].Args = append(workerDS.Spec.Template.Spec.Containers[0].Args, "-owner-refs=node")
+				})
+
+				secondWorkerPod := waitForNewWorkerPod(ctx, firstWorkerPod.UID)
+				nodeOwner := ownerIdentity{APIVersion: "v1", Kind: "Node", Name: targetNodeName, UID: targetNode.UID}
+				Eventually(getOwnerIdentities).WithPolling(time.Second).WithTimeout(5 * time.Minute).WithContext(ctx).Should(ConsistOf(nodeOwner))
+
+				migratedNodeFeature, err := getNodeFeature(ctx)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(migratedNodeFeature.UID).To(Equal(originalNodeFeature.UID))
+				Expect(migratedNodeFeature.Spec).To(Equal(originalNodeFeature.Spec))
+				Expect(migratedNodeFeature.Annotations).To(HaveKeyWithValue(nfdv1alpha1.WorkerPodUIDAnnotation, string(secondWorkerPod.UID)))
 			})
 		})
 

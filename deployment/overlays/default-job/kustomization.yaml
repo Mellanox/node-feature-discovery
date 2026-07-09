@@ -12,5 +12,6 @@ resources:
 
 components:
 - ../../components/worker-config
+- ../../components/worker-node-rbac
 - ../../components/common
 - ../../components/master-config

@@ -34,3 +34,6 @@ spec:
             - "nfd-worker"
           args:
             - "-oneshot"
+            # A one-shot worker has no DaemonSet owner. Tie its NodeFeature to
+            # the target Node instead of the short-lived Job Pod.
+            - "-owner-refs=node"

@@ -90,6 +90,24 @@ func specChanged[T any](oldObj, newObj interface{}, specOf func(*T) any) bool {
 	return !apiequality.Semantic.DeepEqual(specOf(oldT), specOf(newT))
 }
 
+// nodeFeaturePublishMetadataChanged reports metadata updates that prove a new
+// worker publication or change the requested lifecycle of the NodeFeature.
+// Other metadata-only writes remain irrelevant to node reconciliation.
+func nodeFeaturePublishMetadataChanged(oldObj, newObj interface{}) bool {
+	oldNF, oldOK := oldObj.(*nfdv1alpha1.NodeFeature)
+	newNF, newOK := newObj.(*nfdv1alpha1.NodeFeature)
+	if !oldOK || !newOK {
+		return true
+	}
+	if !apiequality.Semantic.DeepEqual(oldNF.OwnerReferences, newNF.OwnerReferences) {
+		return true
+	}
+
+	oldPodUID, oldHasPodUID := oldNF.Annotations[nfdv1alpha1.WorkerPodUIDAnnotation]
+	newPodUID, newHasPodUID := newNF.Annotations[nfdv1alpha1.WorkerPodUIDAnnotation]
+	return oldHasPodUID != newHasPodUID || oldPodUID != newPodUID
+}
+
 func newNfdController(config *restclient.Config, nfdApiControllerOptions nfdApiControllerOptions) (*nfdController, error) {
 	c := &nfdController{
 		stopChan:                       make(chan struct{}),
@@ -206,13 +224,17 @@ func (c *nfdController) onNodeFeatureAdd(obj interface{}) {
 }
 
 func (c *nfdController) onNodeFeatureUpdate(oldObj, newObj interface{}) {
-	if !specChanged(oldObj, newObj, func(o *nfdv1alpha1.NodeFeature) any { return o.Spec }) {
+	nodeFeatureSpecChanged := specChanged(oldObj, newObj, func(o *nfdv1alpha1.NodeFeature) any { return o.Spec })
+	if !nodeFeatureSpecChanged && !nodeFeaturePublishMetadataChanged(oldObj, newObj) {
 		return
 	}
 	nfr := newObj.(*nfdv1alpha1.NodeFeature)
 	klog.V(2).InfoS("NodeFeature updated", "nodefeature", klog.KObj(nfr))
 	c.updateOneNode("NodeFeature", nfr)
-	if !c.disableNodeFeatureGroup {
+	// Owner and worker identity changes require refreshing only the target
+	// Node. NodeFeatureGroup evaluation depends on the spec and can retain the
+	// more aggressive metadata-update filtering.
+	if nodeFeatureSpecChanged && !c.disableNodeFeatureGroup {
 		c.updateAllNodeFeatureGroups()
 	}
 }

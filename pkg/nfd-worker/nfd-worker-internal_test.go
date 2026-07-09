@@ -17,6 +17,7 @@ limitations under the License.
 package nfdworker
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"regexp"
@@ -27,6 +28,8 @@ import (
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/vektra/errors"
 	fakeclient "k8s.io/client-go/kubernetes/fake"
+	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 
 	nfdv1alpha1 "sigs.k8s.io/node-feature-discovery/api/nfd/v1alpha1"
 	"sigs.k8s.io/node-feature-discovery/pkg/utils"
@@ -37,6 +40,44 @@ import (
 )
 
 const fakeLabelSourceName string = "testSource"
+
+func TestDeprecatedNoOwnerRefsWarning(t *testing.T) {
+	state := klog.CaptureState()
+	defer state.Restore()
+	klog.LogToStderr(false)
+
+	testCases := []struct {
+		name      string
+		args      *Args
+		overrides string
+	}{
+		{name: "configuration option", args: &Args{}, overrides: `{"core":{"noOwnerRefs":true}}`},
+		{name: "command-line flag", args: &Args{Overrides: ConfigOverrideArgs{NoOwnerRefs: ptr.To(true)}}},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var output bytes.Buffer
+			klog.SetOutput(&output)
+
+			w, err := NewNfdWorker(
+				WithArgs(tc.args),
+				WithKubernetesClient(fakeclient.NewClientset()),
+			)
+			if err != nil {
+				t.Fatalf("NewNfdWorker() returned error: %v", err)
+			}
+			worker := w.(*nfdWorker)
+			if err := worker.configure(context.Background(), "", tc.overrides); err != nil {
+				t.Fatalf("configure() returned error: %v", err)
+			}
+			klog.Flush()
+
+			if !strings.Contains(output.String(), "deprecated 'core.noOwnerRefs'") {
+				t.Fatalf("deprecation warning was not logged; output: %s", output.String())
+			}
+		})
+	}
+}
 
 func TestGetLabelsWithMockSources(t *testing.T) {
 	Convey("When I discover features from fake source and update the node using fake client", t, func() {
@@ -101,7 +142,7 @@ func TestConfigParse(t *testing.T) {
 			WithKubernetesClient(k8sCli))
 		So(err, ShouldBeNil)
 		worker := w.(*nfdWorker)
-		overrides := `{"core": {"labelSources": ["fake"],"noPublish": true},"sources": {"cpu": {"cpuid": {"attributeBlacklist": ["foo","bar"]}}}}`
+		overrides := `{"core": {"labelSources": ["fake"],"noPublish": true,"ownerRefs": []},"sources": {"cpu": {"cpuid": {"attributeBlacklist": ["foo","bar"]}}}}`
 
 		Convey("and no core cmdline flags have been specified", func() {
 			So(worker.configure(context.Background(), "non-existing-file", overrides), ShouldBeNil)
@@ -110,6 +151,8 @@ func TestConfigParse(t *testing.T) {
 				So(worker.config.Core.LabelSources, ShouldResemble, []string{"fake"})
 				So(worker.config.Core.FeatureSources, ShouldResemble, []string{"all"})
 				So(worker.config.Core.NoPublish, ShouldBeTrue)
+				So(worker.config.Core.OwnerRefs, ShouldNotBeNil)
+				So(*worker.config.Core.OwnerRefs, ShouldBeEmpty)
 			})
 		})
 		Convey("and a non-accessible file, but core cmdline flags and some overrides are specified", func() {

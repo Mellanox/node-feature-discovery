@@ -82,6 +82,10 @@ type coreConfig struct {
 	LabelWhiteList utils.RegexpVal
 	NoPublish      bool
 	NoOwnerRefs    bool
+	// OwnerRefs selects the Kubernetes objects used as owners of the
+	// NodeFeature published by this worker. An explicit empty value disables
+	// owner references.
+	OwnerRefs      *OwnerRefSources
 	FeatureSources []string
 	Sources        *[]string
 	LabelSources   []string
@@ -98,6 +102,84 @@ type sourcesConfig map[string]source.Config
 
 // Labels are a Kubernetes representation of discovered features.
 type Labels map[string]string
+
+const (
+	ownerRefNode = "node"
+	ownerRefPod  = "pod"
+	ownerRefDS   = "ds"
+)
+
+var ownerRefSourceOrder = []string{ownerRefNode, ownerRefPod, ownerRefDS}
+
+// OwnerRefSources is the ordered set of object types that should own the
+// NodeFeature published by nfd-worker. It implements flag.Value and JSON
+// unmarshalling so command-line and configuration-file input share the same
+// validation.
+type OwnerRefSources []string
+
+// Set implements flag.Value.
+func (s *OwnerRefSources) Set(value string) error {
+	values := []string{}
+	for value := range strings.SplitSeq(value, ",") {
+		if value = strings.TrimSpace(value); value != "" {
+			values = append(values, value)
+		}
+	}
+
+	normalized, err := normalizeOwnerRefSources(values)
+	if err != nil {
+		return err
+	}
+	*s = normalized
+	return nil
+}
+
+// String implements flag.Value.
+func (s *OwnerRefSources) String() string {
+	if s == nil {
+		return ""
+	}
+	return strings.Join(*s, ",")
+}
+
+// UnmarshalJSON validates owner reference sources read from YAML/JSON worker
+// configuration.
+func (s *OwnerRefSources) UnmarshalJSON(data []byte) error {
+	var values []string
+	if err := json.Unmarshal(data, &values); err != nil {
+		return err
+	}
+
+	normalized, err := normalizeOwnerRefSources(values)
+	if err != nil {
+		return err
+	}
+	*s = normalized
+	return nil
+}
+
+func normalizeOwnerRefSources(values []string) (OwnerRefSources, error) {
+	selected := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if _, found := selected[value]; found {
+			return nil, fmt.Errorf("duplicate owner reference source %q", value)
+		}
+		switch value {
+		case ownerRefNode, ownerRefPod, ownerRefDS:
+			selected[value] = struct{}{}
+		default:
+			return nil, fmt.Errorf("invalid owner reference source %q (must be one of: node, pod, ds)", value)
+		}
+	}
+
+	normalized := make(OwnerRefSources, 0, len(selected))
+	for _, value := range ownerRefSourceOrder {
+		if _, found := selected[value]; found {
+			normalized = append(normalized, value)
+		}
+	}
+	return normalized, nil
+}
 
 // Args are the command line arguments of NfdWorker.
 type Args struct {
@@ -116,6 +198,7 @@ type Args struct {
 type ConfigOverrideArgs struct {
 	NoPublish         *bool
 	NoOwnerRefs       *bool
+	OwnerRefs         *OwnerRefSources
 	FeatureSources    *utils.StringSliceVal
 	LabelSources      *utils.StringSliceVal
 	NoPublishFeatures *utils.StringSliceVal
@@ -210,10 +293,12 @@ func NewNfdWorker(opts ...NfdWorkerOption) (NfdWorker, error) {
 }
 
 func newDefaultConfig() *NFDConfig {
+	ownerRefs := OwnerRefSources{ownerRefPod, ownerRefDS}
 	return &NFDConfig{
 		Core: coreConfig{
 			LabelWhiteList: utils.RegexpVal{Regexp: *regexp.MustCompile("")},
 			SleepInterval:  utils.DurationVal{Duration: 60 * time.Second},
+			OwnerRefs:      &ownerRefs,
 			FeatureSources: []string{"all"},
 			LabelSources:   []string{"all"},
 			Klog:           make(map[string]string),
@@ -270,44 +355,124 @@ func (w *nfdWorker) runFeatureDiscovery() error {
 	return w.publishNodeFeatureObject()
 }
 
-// Set owner ref
+// setOwnerReference resolves the owner references to publish on the worker's
+// NodeFeature. The complete ownerReferences list is replaced with the resolved
+// value so deselected owners cannot continue extending the object's lifetime.
 func (w *nfdWorker) setOwnerReference() error {
-	ownerReference := []metav1.OwnerReference{}
-
-	if !w.config.Core.NoOwnerRefs {
-		// Get pod owner reference
-		podName := os.Getenv("POD_NAME")
-		// Add pod owner reference if it exists
-		if podName != "" {
-			if selfPod, err := w.k8sClient.CoreV1().Pods(w.kubernetesNamespace).Get(context.TODO(), podName, metav1.GetOptions{}); err != nil {
-				klog.ErrorS(err, "failed to get self pod, cannot inherit ownerReference for NodeFeature")
-				return err
-			} else {
-				for _, owner := range selfPod.OwnerReferences {
-					owner.BlockOwnerDeletion = ptr.To(false)
-					ownerReference = append(ownerReference, owner)
-				}
-			}
-
-			podUID := os.Getenv("POD_UID")
-			if podUID != "" {
-				ownerReference = append(ownerReference, metav1.OwnerReference{
-					APIVersion: "v1",
-					Kind:       "Pod",
-					Name:       podName,
-					UID:        types.UID(podUID),
-				})
-			} else {
-				klog.InfoS("Cannot append POD ownerReference to NodeFeature, POD_UID not specified")
-			}
-		} else {
-			klog.InfoS("Cannot set NodeFeature owner references, POD_NAME not specified")
-		}
+	if w.config.Core.NoOwnerRefs {
+		w.ownerReference = []metav1.OwnerReference{}
+		return nil
 	}
 
-	w.ownerReference = ownerReference
-
+	sources := OwnerRefSources{ownerRefPod, ownerRefDS}
+	if w.config.Core.OwnerRefs != nil {
+		sources = *w.config.Core.OwnerRefs
+	}
+	ownerRefs, err := w.resolveOwnerReferences(sources)
+	if err != nil {
+		return err
+	}
+	w.ownerReference = ownerRefs
 	return nil
+}
+
+func (w *nfdWorker) resolveOwnerReferences(sources OwnerRefSources) ([]metav1.OwnerReference, error) {
+	ownerRefs := make([]metav1.OwnerReference, 0, len(sources))
+	for _, source := range sources {
+		ownerRef, err := w.resolveOwnerReference(source)
+		if err != nil {
+			return nil, err
+		}
+		if ownerRef != nil {
+			ownerRefs = append(ownerRefs, *ownerRef)
+		}
+	}
+	return ownerRefs, nil
+}
+
+func (w *nfdWorker) resolveOwnerReference(source string) (*metav1.OwnerReference, error) {
+	switch source {
+	case ownerRefNode:
+		return w.resolveNodeOwnerReference()
+	case ownerRefPod:
+		return resolvePodOwnerReference(), nil
+	case ownerRefDS:
+		return w.resolveDaemonSetOwnerReference()
+	default:
+		// OwnerRefSources validates input, but fail safely if a value is
+		// constructed directly by a caller.
+		return nil, fmt.Errorf("invalid owner reference source %q", source)
+	}
+}
+
+func (w *nfdWorker) resolveNodeOwnerReference() (*metav1.OwnerReference, error) {
+	nodeName := utils.NodeName()
+	if nodeName == "" {
+		return nil, fmt.Errorf("cannot resolve Node owner reference: NODE_NAME not specified")
+	}
+	node, err := w.k8sClient.CoreV1().Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("cannot resolve Node owner reference %q: %w", nodeName, err)
+	}
+	return &metav1.OwnerReference{
+		APIVersion:         "v1",
+		Kind:               "Node",
+		Name:               node.Name,
+		UID:                node.UID,
+		BlockOwnerDeletion: ptr.To(false),
+	}, nil
+}
+
+func resolvePodOwnerReference() *metav1.OwnerReference {
+	podName, podUID := os.Getenv("POD_NAME"), os.Getenv("POD_UID")
+	if podName == "" || podUID == "" {
+		klog.InfoS("Cannot resolve Pod owner reference, POD_NAME and POD_UID must be specified")
+		return nil
+	}
+	return &metav1.OwnerReference{
+		APIVersion:         "v1",
+		Kind:               "Pod",
+		Name:               podName,
+		UID:                types.UID(podUID),
+		BlockOwnerDeletion: ptr.To(false),
+	}
+}
+
+func (w *nfdWorker) resolveDaemonSetOwnerReference() (*metav1.OwnerReference, error) {
+	podName := os.Getenv("POD_NAME")
+	if podName == "" {
+		klog.InfoS("Cannot resolve DaemonSet owner reference, POD_NAME not specified")
+		return nil, nil
+	}
+	pod, err := w.k8sClient.CoreV1().Pods(w.kubernetesNamespace).Get(context.TODO(), podName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("cannot get worker Pod %q to resolve DaemonSet owner reference: %w", podName, err)
+	}
+	daemonSetOwner, err := findDaemonSetOwnerReference(pod.OwnerReferences)
+	if err != nil {
+		return nil, fmt.Errorf("cannot resolve DaemonSet owner reference: worker Pod %q %w", podName, err)
+	}
+	if daemonSetOwner == nil {
+		klog.InfoS("Cannot resolve DaemonSet owner reference, worker Pod is not owned by a DaemonSet", "pod", podName)
+		return nil, nil
+	}
+	daemonSetOwner.BlockOwnerDeletion = ptr.To(false)
+	return daemonSetOwner, nil
+}
+
+func findDaemonSetOwnerReference(ownerRefs []metav1.OwnerReference) (*metav1.OwnerReference, error) {
+	var daemonSetOwner *metav1.OwnerReference
+	for i := range ownerRefs {
+		owner := ownerRefs[i]
+		if owner.APIVersion != "apps/v1" || owner.Kind != "DaemonSet" {
+			continue
+		}
+		if daemonSetOwner != nil {
+			return nil, fmt.Errorf("has multiple DaemonSet owners")
+		}
+		daemonSetOwner = &owner
+	}
+	return daemonSetOwner, nil
 }
 
 // Run NfdWorker client. Returns an error if a fatal error is encountered, or, after
@@ -524,6 +689,9 @@ func (w *nfdWorker) configure(ctx context.Context, filepath string, overrides st
 	}
 
 	w.applyConfigOverrides(c)
+	if c.Core.NoOwnerRefs || w.args.Overrides.NoOwnerRefs != nil {
+		klog.InfoS("usage of deprecated 'core.noOwnerRefs' configuration option or '-no-owner-refs' flag, please use 'core.ownerRefs: []' or '-owner-refs=' instead")
+	}
 
 	c.Core.sanitize()
 
@@ -579,6 +747,10 @@ func (w *nfdWorker) applyConfigOverrides(c *NFDConfig) {
 	}
 	if w.args.Overrides.NoOwnerRefs != nil {
 		c.Core.NoOwnerRefs = *w.args.Overrides.NoOwnerRefs
+	}
+	if w.args.Overrides.OwnerRefs != nil {
+		ownerRefs := append(OwnerRefSources{}, (*w.args.Overrides.OwnerRefs)...)
+		c.Core.OwnerRefs = &ownerRefs
 	}
 	if w.args.Overrides.FeatureSources != nil {
 		c.Core.FeatureSources = *w.args.Overrides.FeatureSources
@@ -748,6 +920,13 @@ func (m *nfdWorker) updateNodeFeatureObject(labels Labels) error {
 	namespace := m.kubernetesNamespace
 
 	features := source.GetAllFeatures()
+	annotations := map[string]string{nfdv1alpha1.WorkerVersionAnnotation: version.Get()}
+	if podUID := os.Getenv("POD_UID"); podUID != "" {
+		// This is deliberately written with the discovered spec. A new value
+		// tells nfd-master that a newly started worker completed discovery even
+		// when the resulting spec is identical to the previous one.
+		annotations[nfdv1alpha1.WorkerPodUIDAnnotation] = podUID
+	}
 
 	// Strip features that are configured not to be published. Discovery has
 	// already run (and feature labels have already been computed from the full
@@ -766,7 +945,7 @@ func (m *nfdWorker) updateNodeFeatureObject(labels Labels) error {
 		nfr = &nfdv1alpha1.NodeFeature{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:            nodename,
-				Annotations:     map[string]string{nfdv1alpha1.WorkerVersionAnnotation: version.Get()},
+				Annotations:     annotations,
 				Labels:          map[string]string{nfdv1alpha1.NodeFeatureObjNodeNameLabel: nodename},
 				OwnerReferences: m.ownerReference,
 			},
@@ -787,7 +966,7 @@ func (m *nfdWorker) updateNodeFeatureObject(labels Labels) error {
 		return fmt.Errorf("failed to get NodeFeature object: %w", err)
 	} else {
 		nfrUpdated := nfr.DeepCopy()
-		nfrUpdated.Annotations = map[string]string{nfdv1alpha1.WorkerVersionAnnotation: version.Get()}
+		nfrUpdated.Annotations = annotations
 		nfrUpdated.Labels = map[string]string{nfdv1alpha1.NodeFeatureObjNodeNameLabel: nodename}
 		nfrUpdated.OwnerReferences = m.ownerReference
 		nfrUpdated.Spec = nfdv1alpha1.NodeFeatureSpec{

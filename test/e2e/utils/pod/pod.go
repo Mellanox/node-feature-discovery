@@ -533,3 +533,10 @@ func pullPolicy() corev1.PullPolicy {
 	}
 	return corev1.PullAlways
 }
+
+// PullPolicy returns the image pull policy selected via the
+// -nfd.pull-if-not-present flag, so other e2e helpers (e.g. Helm-based
+// deployments) can honor the same setting.
+func PullPolicy() corev1.PullPolicy {
+	return pullPolicy()
+}

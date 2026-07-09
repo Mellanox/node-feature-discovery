@@ -37,6 +37,7 @@ import (
 
 	nfdclient "sigs.k8s.io/node-feature-discovery/api/generated/clientset/versioned"
 	nfdv1alpha1 "sigs.k8s.io/node-feature-discovery/api/nfd/v1alpha1"
+	testpod "sigs.k8s.io/node-feature-discovery/test/e2e/utils/pod"
 
 	"sigs.k8s.io/e2e-framework/third_party/helm"
 )
@@ -77,17 +78,29 @@ func getResourceName(releaseName, suffix string) string {
 	return releaseName + nfdNamePrefix + suffix
 }
 
+// helmImageArgs returns the --set arguments that point the chart at the image
+// under test. Without these, Helm would deploy the chart's default image
+// (gcr.io/k8s-staging-nfd/node-feature-discovery:<appVersion>) instead of the
+// freshly built one, so the chart templates would be exercised against a stale
+// binary that may not understand newly added flags.
+func helmImageArgs() []string {
+	return []string{
+		"--set", "image.repository=" + *dockerRepo,
+		"--set", "image.tag=" + *dockerTag,
+		"--set", "image.pullPolicy=" + string(testpod.PullPolicy()),
+	}
+}
+
 // installHelmChart installs an NFD Helm chart with the given options
 func installHelmChart(helmMgr *helm.Manager, releaseName, namespace, chartPath string, extraArgs ...string) error {
+	args := append(helmImageArgs(), extraArgs...)
 	installArgs := []helm.Option{
 		helm.WithName(releaseName),
 		helm.WithNamespace(namespace),
 		helm.WithChart(chartPath),
+		helm.WithArgs(args...),
 		helm.WithWait(),
 		helm.WithTimeout(helmInstallTimeout),
-	}
-	if len(extraArgs) > 0 {
-		installArgs = append(installArgs, helm.WithArgs(extraArgs...))
 	}
 	return helmMgr.RunInstall(installArgs...)
 }
@@ -228,7 +241,7 @@ var _ = NFDDescribe(Label("helm"), func() {
 				helm.WithName(releaseName),
 				helm.WithNamespace(f.Namespace.Name),
 				helm.WithChart(chartPath),
-				helm.WithArgs("--set", "gc.replicaCount=2"),
+				helm.WithArgs(append(helmImageArgs(), "--set", "gc.replicaCount=2")...),
 				helm.WithWait(),
 				helm.WithTimeout(helmInstallTimeout),
 			)
@@ -403,6 +416,7 @@ var _ = NFDDescribe(Label("helm"), func() {
 		roles                  []string // Role suffixes (namespaced)
 		clusterRoles           []string // ClusterRole suffixes
 		missingClusterRoles    []string // ClusterRole suffixes that must NOT exist
+		workerOwnerRefs        string   // Expected value of the worker's -owner-refs argument
 	}
 
 	DescribeTable("RBAC and configuration resources",
@@ -419,6 +433,14 @@ var _ = NFDDescribe(Label("helm"), func() {
 			defer func() {
 				cleanupHelmRelease(ctx, helmMgr, nfdClient, f.ClientSet, releaseName, f.Namespace.Name)
 			}()
+
+			if tc.workerOwnerRefs != "" {
+				By("Verifying the worker owner reference argument")
+				workerDS, err := f.ClientSet.AppsV1().DaemonSets(f.Namespace.Name).Get(
+					ctx, getResourceName(releaseName, "-worker"), metav1.GetOptions{})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(workerDS.Spec.Template.Spec.Containers[0].Args).To(ContainElement("-owner-refs=" + tc.workerOwnerRefs))
+			}
 
 			// Verify ServiceAccounts that must exist
 			for _, suffix := range tc.serviceAccounts {
@@ -520,6 +542,32 @@ var _ = NFDDescribe(Label("helm"), func() {
 				"",
 				"-gc",
 			},
+			missingClusterRoles: []string{
+				"-worker",
+			},
+			workerOwnerRefs: "pod,ds",
+		}),
+		Entry("worker Node owner RBAC", rbacTestCase{
+			name:     "worker Node owner RBAC",
+			helmArgs: []string{"--set", "worker.ownerRefs={node}"},
+			serviceAccounts: []string{
+				"",
+				"-gc",
+				"-worker",
+			},
+			configMaps: []string{
+				"-master-conf",
+				"-worker-conf",
+			},
+			roles: []string{
+				"-worker",
+			},
+			clusterRoles: []string{
+				"",
+				"-gc",
+				"-worker",
+			},
+			workerOwnerRefs: "node",
 		}),
 		Entry("topology-updater RBAC when enabled", rbacTestCase{
 			name:     "topology-updater RBAC when enabled",
@@ -543,6 +591,10 @@ var _ = NFDDescribe(Label("helm"), func() {
 				"-gc",
 				"-topology-updater",
 			},
+			missingClusterRoles: []string{
+				"-worker",
+			},
+			workerOwnerRefs: "pod,ds",
 		}),
 		Entry("gc disabled removes gc RBAC", rbacTestCase{
 			name:     "gc disabled removes gc RBAC",
@@ -566,7 +618,9 @@ var _ = NFDDescribe(Label("helm"), func() {
 			},
 			missingClusterRoles: []string{
 				"-gc",
+				"-worker",
 			},
+			workerOwnerRefs: "pod,ds",
 		}),
 	)
 

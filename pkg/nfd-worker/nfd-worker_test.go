@@ -19,12 +19,16 @@ package nfdworker_test
 import (
 	"context"
 	"os"
+	"sync"
 	"testing"
 
 	. "github.com/smartystreets/goconvey/convey"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	fakeclient "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 
 	fakenfdclient "sigs.k8s.io/node-feature-discovery/api/generated/clientset/versioned/fake"
 	nfdv1alpha1 "sigs.k8s.io/node-feature-discovery/api/nfd/v1alpha1"
@@ -33,11 +37,92 @@ import (
 	"sigs.k8s.io/node-feature-discovery/pkg/utils"
 )
 
+var initializeFeatureGatesOnce sync.Once
+
 func initializeFeatureGates() {
-	if err := features.NFDMutableFeatureGate.Add(features.DefaultNFDFeatureGates); err != nil {
-		klog.ErrorS(err, "failed to add default feature gates")
-		os.Exit(1)
+	initializeFeatureGatesOnce.Do(func() {
+		if err := features.NFDMutableFeatureGate.Add(features.DefaultNFDFeatureGates); err != nil {
+			klog.ErrorS(err, "failed to add default feature gates")
+			os.Exit(1)
+		}
+	})
+}
+
+func TestOwnerReferenceMigrationWithUnchangedSpec(t *testing.T) {
+	initializeFeatureGates()
+	t.Setenv("NODE_NAME", "fake-node")
+	t.Setenv("KUBERNETES_NAMESPACE", "fake-ns")
+	t.Setenv("POD_NAME", "fake-worker")
+	t.Setenv("POD_UID", "fake-worker-pod-uid")
+
+	//nolint:staticcheck // NewClientset cannot field-manage NodeFeature with the generated schema.
+	nfdCli := fakenfdclient.NewSimpleClientset()
+	k8sCli := fakeclient.NewSimpleClientset(&corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "fake-node", UID: types.UID("node-uid")},
+	})
+
+	emptyOwnerRefs := worker.OwnerRefSources{}
+	initialArgs := &worker.Args{
+		Oneshot: true,
+		Overrides: worker.ConfigOverrideArgs{
+			FeatureSources: &utils.StringSliceVal{"fake"},
+			LabelSources:   &utils.StringSliceVal{"fake"},
+			OwnerRefs:      &emptyOwnerRefs,
+		},
 	}
+	initialWorker, err := worker.NewNfdWorker(
+		worker.WithArgs(initialArgs),
+		worker.WithKubernetesClient(k8sCli),
+		worker.WithNFDClient(nfdCli),
+	)
+	if err != nil {
+		t.Fatalf("failed to create initial worker: %v", err)
+	}
+	if err := initialWorker.Run(); err != nil {
+		t.Fatalf("initial worker run failed: %v", err)
+	}
+	initialNF, err := nfdCli.NfdV1alpha1().NodeFeatures("fake-ns").Get(context.TODO(), "fake-node", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("failed to get initial NodeFeature: %v", err)
+	}
+
+	nodeOwnerRefs := worker.OwnerRefSources{"node"}
+	migratingArgs := &worker.Args{
+		Oneshot: true,
+		Overrides: worker.ConfigOverrideArgs{
+			FeatureSources: &utils.StringSliceVal{"fake"},
+			LabelSources:   &utils.StringSliceVal{"fake"},
+			OwnerRefs:      &nodeOwnerRefs,
+		},
+	}
+	migratingWorker, err := worker.NewNfdWorker(
+		worker.WithArgs(migratingArgs),
+		worker.WithKubernetesClient(k8sCli),
+		worker.WithNFDClient(nfdCli),
+	)
+	if err != nil {
+		t.Fatalf("failed to create migrating worker: %v", err)
+	}
+	if err := migratingWorker.Run(); err != nil {
+		t.Fatalf("migrating worker run failed: %v", err)
+	}
+	updatedNF, err := nfdCli.NfdV1alpha1().NodeFeatures("fake-ns").Get(context.TODO(), "fake-node", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("failed to get migrated NodeFeature: %v", err)
+	}
+
+	Convey("owner references migrate without changing the discovered spec", t, func() {
+		So(updatedNF.Spec, ShouldResemble, initialNF.Spec)
+		So(updatedNF.OwnerReferences, ShouldResemble, []metav1.OwnerReference{
+			{
+				APIVersion:         "v1",
+				Kind:               "Node",
+				Name:               "fake-node",
+				UID:                types.UID("node-uid"),
+				BlockOwnerDeletion: ptr.To(false),
+			},
+		})
+	})
 }
 
 func TestRun(t *testing.T) {
@@ -46,8 +131,10 @@ func TestRun(t *testing.T) {
 	initializeFeatureGates()
 	Convey("When running nfd-worker", t, func() {
 		Convey("When publishing features from fake source", func() {
-			_ = os.Setenv("NODE_NAME", "fake-node")
-			_ = os.Setenv("KUBERNETES_NAMESPACE", "fake-ns")
+			t.Setenv("NODE_NAME", "fake-node")
+			t.Setenv("KUBERNETES_NAMESPACE", "fake-ns")
+			t.Setenv("POD_NAME", "")
+			t.Setenv("POD_UID", "fake-worker-pod-uid")
 			args := &worker.Args{
 				Oneshot: true,
 				Overrides: worker.ConfigOverrideArgs{
@@ -78,6 +165,7 @@ func TestRun(t *testing.T) {
 						},
 						Annotations: map[string]string{
 							"nfd.node.kubernetes.io/worker.version": "undefined",
+							"nfd.node.kubernetes.io/worker.pod.uid": "fake-worker-pod-uid",
 						},
 						OwnerReferences: []metav1.OwnerReference{},
 					},

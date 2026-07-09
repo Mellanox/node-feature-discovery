@@ -180,10 +180,57 @@ core:
   noPublish: true
 ```
 
+### core.ownerRefs
+
+The `core.ownerRefs` option selects the objects referenced as owners of the
+NodeFeature object. Valid values are `node`, `pod` and `ds`. An explicitly empty
+list disables owner references.
+
+- `node` ties the NodeFeature to the UID of the current Node and is recommended
+  for environments that rebuild Nodes under the same name.
+- `pod` ties it to the UID of the nfd-worker Pod.
+- `ds` ties it to the DaemonSet that owns the nfd-worker Pod.
+
+When multiple owners are configured, Kubernetes keeps the NodeFeature while at
+least one owner still exists. Thus, adding `ds` makes the DaemonSet the
+longest-lived owner during a Node rebuild.
+
+Selecting `node` requires the worker service account to have `get` permission
+for Nodes. The Helm chart creates this permission when `worker.ownerRefs`
+contains `node`. Kustomize installations must include the
+[`worker-node-rbac`](https://github.com/kubernetes-sigs/node-feature-discovery/tree/{{site.release}}/deployment/components/worker-node-rbac)
+component. Installations with custom RBAC must add the permission. The NFD
+garbage collector may still explicitly delete stale NodeFeature objects
+independently of native owner-reference garbage collection.
+
+Changes to this option take effect only after nfd-worker restarts; nfd-worker
+does not reload its configuration at runtime. On its first publication after a
+restart, each worker replaces the complete owner reference list on its existing
+NodeFeature. Thus, a DaemonSet rollout migrates live Nodes in place without
+deleting the NodeFeature, even when its discovered feature spec is unchanged.
+Changing `worker.ownerRefs` in a Helm release updates the worker Pod arguments
+and triggers this rollout. Nodes without a running worker converge when their
+worker next starts.
+
+> **NOTE:** Overridden by the
+> [`-owner-refs`](worker-commandline-reference.md#-owner-refs)
+> command line flag (if specified).
+
+Default: `[pod, ds]`
+
+Example:
+
+```yaml
+core:
+  ownerRefs: [node]
+```
+
 ### core.noOwnerRefs
 
 Setting `core.noOwnerRefs` to `true` disables setting the owner references
-of the NodeFeature object created by the nfd-worker.
+of the NodeFeature object created by the nfd-worker. This option is deprecated;
+use `core.ownerRefs: []` instead. When true, it takes precedence over
+`core.ownerRefs`.
 
 > **NOTE:** Overridden by the
 > [`-no-owner-refs`](worker-commandline-reference.md#-no-owner-refs)

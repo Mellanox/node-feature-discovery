@@ -197,3 +197,78 @@ func TestSpecChanged(t *testing.T) {
 		assert.Equalf(t, tc.want, tc.got, tc.name)
 	}
 }
+
+func TestNodeFeaturePublishMetadataChanged(t *testing.T) {
+	base := &nfdv1alpha1.NodeFeature{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "node-1",
+			ResourceVersion: "1",
+			Annotations: map[string]string{
+				nfdv1alpha1.WorkerVersionAnnotation: "v0.19.0",
+			},
+		},
+	}
+
+	resourceVersionOnly := base.DeepCopy()
+	resourceVersionOnly.ResourceVersion = "2"
+
+	workerVersionOnly := base.DeepCopy()
+	workerVersionOnly.Annotations[nfdv1alpha1.WorkerVersionAnnotation] = "v0.19.1"
+
+	ownerChanged := base.DeepCopy()
+	ownerChanged.OwnerReferences = []metav1.OwnerReference{{APIVersion: "v1", Kind: "Node", Name: "node-1", UID: "new-node-uid"}}
+
+	workerPodChanged := base.DeepCopy()
+	workerPodChanged.Annotations[nfdv1alpha1.WorkerPodUIDAnnotation] = "new-worker-pod-uid"
+
+	testCases := []struct {
+		name string
+		old  interface{}
+		new  interface{}
+		want bool
+	}{
+		{name: "resource version only", old: base, new: resourceVersionOnly, want: false},
+		{name: "worker version only", old: base, new: workerVersionOnly, want: false},
+		{name: "owner references", old: base, new: ownerChanged, want: true},
+		{name: "worker Pod identity", old: base, new: workerPodChanged, want: true},
+		{name: "unexpected object", old: &nfdv1alpha1.NodeFeatureRule{}, new: base, want: true},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, nodeFeaturePublishMetadataChanged(tc.old, tc.new))
+		})
+	}
+}
+
+func TestNodeFeatureMetadataUpdateQueuesOnlyTargetNode(t *testing.T) {
+	oldNF := &nfdv1alpha1.NodeFeature{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "node-1",
+			Labels: map[string]string{
+				nfdv1alpha1.NodeFeatureObjNodeNameLabel: "node-1",
+			},
+		},
+	}
+	newNF := oldNF.DeepCopy()
+	newNF.OwnerReferences = []metav1.OwnerReference{{APIVersion: "v1", Kind: "Node", Name: "node-1", UID: "node-uid"}}
+
+	c := &nfdController{
+		stopChan:                       make(chan struct{}),
+		updateOneNodeChan:              make(chan string, 1),
+		updateAllNodeFeatureGroupsChan: make(chan struct{}, 1),
+	}
+	c.onNodeFeatureUpdate(oldNF, newNF)
+
+	select {
+	case got := <-c.updateOneNodeChan:
+		assert.Equal(t, "node-1", got)
+	default:
+		t.Fatal("target node was not queued")
+	}
+	select {
+	case <-c.updateAllNodeFeatureGroupsChan:
+		t.Fatal("metadata-only update unexpectedly queued all NodeFeatureGroups")
+	default:
+	}
+}
