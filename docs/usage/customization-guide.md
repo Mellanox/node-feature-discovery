@@ -1134,10 +1134,16 @@ union of all the individual expansions.
 
 Rule templates use the Golang [text/template](https://pkg.go.dev/text/template)
 package along with [Sprig functions](https://masterminds.github.io/sprig/)
-and all their functionality (e.g. pipelines and functions) can
-be used. An example template taking use of the built-in `len` function,
-advertising the number of PCI network controllers from a specific vendor,
-and using Sprig's `first`, `trim` and `substr` to advertise the first one's class:
+and most of their functionality (e.g. pipelines and functions) can
+be used. The `env`, `expandenv` and `getHostByName` functions are removed
+from the available Sprig functions, as these are the only Sprig builtins
+that read host process environment state or perform outbound DNS lookups
+and are not needed for label expansion. A template referencing any of
+these three functions fails to parse (e.g. `function "env" not defined`);
+the affected rule is skipped and the error is logged by nfd-master. An
+example template taking use of the built-in `len` function, advertising
+the number of PCI network controllers from a specific vendor, and using
+Sprig's `first`, `trim` and `substr` to advertise the first one's class:
 <!-- {% raw %} -->
 
 ```yaml
