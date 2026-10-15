@@ -9,7 +9,7 @@ IMAGE_BUILD_CMD ?= docker build
 IMAGE_BUILD_EXTRA_OPTS ?=
 IMAGE_PUSH_CMD ?= docker push
 CONTAINER_RUN_CMD ?= docker run
-BUILDER_IMAGE ?= golang:1.26-trixie
+BUILDER_IMAGE ?= golang:1.27-trixie
 BASE_IMAGE_FULL ?= debian:bookworm-slim
 BASE_IMAGE_MINIMAL ?= scratch
 
@@ -187,6 +187,8 @@ generate-api-docs-nfd:
 	$(GO_CMD) tool crd-ref-docs \
 		--source-path=./api/nfd/v1alpha1 \
 		--config=./hack/crd-ref-docs/config.yaml \
+		--templates-dir=./hack/crd-ref-docs/templates \
+		--max-depth=20 \
 		--renderer=markdown \
 		--output-path=./docs/reference/generated-nfd-api-reference.md
 	@# Add Jekyll front matter for site integration
